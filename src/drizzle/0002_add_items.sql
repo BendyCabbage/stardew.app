@@ -1,0 +1,1 @@
+ALTER TABLE `Saves` ADD `items` json DEFAULT (JSON_OBJECT()) NOT NULL;

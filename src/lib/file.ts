@@ -7,7 +7,9 @@ import {
 	parseCrafting,
 	parseFishing,
 	parseGeneral,
+	parseItems,
 	parseMonsters,
+	parseStorageItems,
 	parseMuseum,
 	parsePerfection,
 	parsePowers,
@@ -108,6 +110,8 @@ export function parseSaveFile(xml: string) {
 
 		const parsedRarecrows = parseRarecrows(prefix, saveFile.SaveGame, players);
 
+		const storageItems = parseStorageItems(saveFile.SaveGame);
+
 		const findInGameLocation = (location: string) => {
 			return saveFile.SaveGame.locations.GameLocation.find(
 				(obj: any) => obj[`@_${prefix}:type`] === location,
@@ -145,6 +149,7 @@ export function parseSaveFile(xml: string) {
 				cooking: parseCooking(player, version),
 				crafting: parseCrafting(player),
 				shipping: parseShipping(player, version),
+				items: parseItems(player, storageItems),
 				museum: parsedMuseum,
 				social: parseSocial(
 					player,

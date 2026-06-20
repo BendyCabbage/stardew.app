@@ -37,6 +37,7 @@ export interface Player {
 	cooking?: object;
 	crafting?: object;
 	shipping?: object;
+	items?: object;
 	museum?: object;
 	social?: object;
 	monsters?: object;

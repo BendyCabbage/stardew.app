@@ -257,6 +257,7 @@ export interface GeneralRet {
 	name?: string;
 	timePlayed?: string;
 	farmInfo?: string;
+	money?: number;
 	totalMoneyEarned?: number;
 	skills?: SkillsRet;
 	questsCompleted?: number;
@@ -277,7 +278,8 @@ export function parseGeneral(
 ): GeneralRet {
 	try {
 		const playerFormatUpdated = isPlayerFormatUpdated(player);
-		const { name, totalMoneyEarned, millisecondsPlayed, farmName } = player;
+		const { name, money, totalMoneyEarned, millisecondsPlayed, farmName } =
+			player;
 		const timePlayed = msToTime(millisecondsPlayed);
 		let questsCompleted = 0;
 		if (playerFormatUpdated) {
@@ -306,6 +308,7 @@ export function parseGeneral(
 			name,
 			timePlayed,
 			farmInfo,
+			money,
 			totalMoneyEarned,
 			skills,
 			questsCompleted,

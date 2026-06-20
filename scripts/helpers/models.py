@@ -10,12 +10,14 @@ class Object(TypedDict):
     description: str
     category: str
     minVersion: str
+    price: int
 
 
 class BigObject(TypedDict):
     name: str
     description: str
     minVersion: str
+    price: int
 
 
 class MuseumPiece(TypedDict):
