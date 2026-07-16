@@ -17,6 +17,7 @@ import type { CookingRet } from "@/lib/parsers/cooking";
 import type { CraftingRet } from "@/lib/parsers/crafting";
 import type { FishRet } from "@/lib/parsers/fishing";
 import type { GeneralRet } from "@/lib/parsers/general";
+import type { ItemsRet } from "@/lib/parsers/items";
 import type { MonstersRet } from "@/lib/parsers/monsters";
 import type { MuseumRet } from "@/lib/parsers/museum";
 import type { NotesRet } from "@/lib/parsers/notes";
@@ -51,6 +52,7 @@ export interface PlayerType {
 	powers?: PowersRet;
 	rarecrows?: RarecrowRet;
 	animals?: AnimalsData;
+	items?: ItemsRet;
 }
 
 interface PlayersContextProps {

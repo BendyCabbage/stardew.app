@@ -1,20 +1,27 @@
 {
-	"version": "7",
-	"dialect": "mysql",
-	"entries": [
-		{
-			"idx": 0,
-			"version": "5",
-			"when": 1718504417580,
-			"tag": "0000_spooky_arachne",
-			"breakpoints": true
-		},
-		{
-			"idx": 1,
-			"version": "5",
-			"when": 1718511718218,
-			"tag": "0001_futuristic_bullseye",
-			"breakpoints": true
-		}
-	]
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1718504417580,
+      "tag": "0000_spooky_arachne",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1718511718218,
+      "tag": "0001_futuristic_bullseye",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1784192768375,
+      "tag": "0002_faithful_black_queen",
+      "breakpoints": true
+    }
+  ]
 }
