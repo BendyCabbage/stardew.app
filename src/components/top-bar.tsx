@@ -10,7 +10,10 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { PlayersContext } from "@/contexts/players-context";
 import { clearClientAuthCookies, isInternalHostname } from "@/lib/client-env";
 
-import { ChangelogDialog, CHANGELOG_VERSION } from "@/components/dialogs/changelog-dialog";
+import {
+	ChangelogDialog,
+	CHANGELOG_VERSION,
+} from "@/components/dialogs/changelog-dialog";
 import { CreditsDialog } from "@/components/dialogs/credits-dialog";
 import { DeletionDialog } from "@/components/dialogs/deletion-dialog";
 import { PresetSelector } from "@/components/preset-selector";
@@ -26,9 +29,15 @@ import {
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 import { HamburgerMenuIcon } from "@radix-ui/react-icons";
-import { IconMoon, IconSparkles, IconSun } from "@tabler/icons-react";
+import { IconCloudCheck, IconMoon, IconSun } from "@tabler/icons-react";
 import { useTheme } from "next-themes";
 import { FeedbackDialog } from "./dialogs/feedback-dialog";
 import { LoginDialog } from "./dialogs/login-dialog";
@@ -41,6 +50,27 @@ export interface User {
 	cookie_secret: string;
 	discord_avatar: string;
 	discord_name: string;
+}
+
+const seasonIcons = {
+	spring: "https://stardewvalleywiki.com/mediawiki/images/9/9c/Spring.png",
+	summer: "https://stardewvalleywiki.com/mediawiki/images/8/85/Summer.png",
+	fall: "https://stardewvalleywiki.com/mediawiki/images/5/5d/Fall.png",
+	winter: "https://stardewvalleywiki.com/mediawiki/images/a/a7/Winter.png",
+} as const;
+
+function capitalize(value: string) {
+	return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatRelativeTime(timestampMs: number) {
+	const seconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
+	if (seconds < 5) return "just now";
+	if (seconds < 60) return `${seconds}s ago`;
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.round(minutes / 60);
+	return `${hours}h ago`;
 }
 
 export function Topbar() {
@@ -60,7 +90,8 @@ export function Topbar() {
 
 	const [isInternal, setIsInternal] = useState(false);
 
-	const { activePlayer } = useContext(PlayersContext);
+	const { activePlayer, autoSyncActive, autoSyncLastSyncedAt } =
+		useContext(PlayersContext);
 	const { theme, setTheme } = useTheme();
 
 	useEffect(() => {
@@ -86,16 +117,22 @@ export function Topbar() {
 						alt="stardew.app logo"
 					/>
 					<h1 className="pl-3 font-medium">stardew.app</h1>
-					<button
-						onClick={() => setChangelogOpen(true)}
-						className="ml-2 flex items-center gap-1 rounded-full border border-blue-300 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-600 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"
-					>
-						<IconSparkles size={12} />
-						What&apos;s new?
-					</button>
 					{isInternal && (
 						<span className="ml-2 rounded-full bg-red-100 px-2 py-1 text-xs text-red-500 dark:bg-red-800 dark:text-red-400">
 							Internal
+						</span>
+					)}
+					{activePlayer?.general?.date && (
+						<span className="ml-2 hidden items-center gap-2 rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-sm text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 sm:flex">
+							<Image
+								src={seasonIcons[activePlayer.general.date.season]}
+								alt={capitalize(activePlayer.general.date.season)}
+								width={18}
+								height={18}
+							/>
+							{capitalize(activePlayer.general.date.season)}{" "}
+							{activePlayer.general.date.day}, Year{" "}
+							{activePlayer.general.date.year}
 						</span>
 					)}
 				</div>
@@ -130,6 +167,24 @@ export function Topbar() {
 						<Button variant="outline" data-umami-event="Edit player">
 							<Link href={`/editor/edit`}>Edit Player</Link>
 						</Button>
+					)}
+					{autoSyncActive && (
+						<TooltipProvider>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<span className="flex items-center justify-center px-1 text-green-600 dark:text-green-400">
+										<IconCloudCheck className="h-5 w-5" />
+									</span>
+								</TooltipTrigger>
+								<TooltipContent side="bottom">
+									<p>
+										Auto-syncing your save
+										{autoSyncLastSyncedAt &&
+											` · Last synced ${formatRelativeTime(autoSyncLastSyncedAt)}`}
+									</p>
+								</TooltipContent>
+							</Tooltip>
+						</TooltipProvider>
 					)}
 					<Button
 						variant="secondary"

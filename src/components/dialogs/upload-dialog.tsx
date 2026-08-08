@@ -8,10 +8,32 @@ import {
 } from "@/components/ui/dialog";
 import { PlayersContext } from "@/contexts/players-context";
 import { parseSaveFile } from "@/lib/file";
-import { useContext, useState } from "react";
+import type { FilePickerWindow, SaveFileHandle } from "@/types/save-sync";
+import { play } from "cuelume";
+import { useRouter } from "next/router";
+import { useCallback, useContext, useEffect, useState } from "react";
 import Dropzone from "react-dropzone";
 import { toast } from "sonner";
 import { Button } from "../ui/button";
+
+// Auto-sync depends on the File System Access API. Firefox and Safari never
+// implement it (a browser problem, fixed by switching to Chrome), while
+// Chromium-based mobile browsers don't have it either (a platform problem,
+// fixed by switching to desktop) — there's no fallback for either case, so
+// this is only ever called once supportsAutoSync is already known false.
+function detectAutoSyncIncompatibility():
+	| { kind: "browser"; name: "Firefox" | "Safari" }
+	| { kind: "platform" } {
+	const ua = navigator.userAgent;
+	if (/Firefox\/|FxiOS\//.test(ua)) return { kind: "browser", name: "Firefox" };
+	if (
+		/Safari\//.test(ua) &&
+		!/Chrome\/|Chromium\/|Edg\/|OPR\/|CriOS\/|EdgiOS\//.test(ua)
+	) {
+		return { kind: "browser", name: "Safari" };
+	}
+	return { kind: "platform" };
+}
 
 interface Props {
 	open: boolean;
@@ -21,7 +43,7 @@ interface Props {
 interface InstructionsDialogProps {
 	open: boolean;
 	setOpen: (open: boolean) => void;
-	platform: "Mac" | "Windows" | "Linux" | "Switch";
+	platform: "Mac" | "Windows" | "Linux" | "Console";
 }
 
 const InstructionsDialog = ({
@@ -66,12 +88,12 @@ const InstructionsDialog = ({
 						"5. Look for a file named with your farmer's name and a number (e.g. 'Farmer_123456789')",
 					],
 				};
-			case "Switch":
+			case "Console":
 				return {
-					title: "Nintendo Switch Save Files",
+					title: "Console Save Files",
 					path: "",
 					steps: [
-						"Unfortunately, we don't support direct save file uploading from Nintendo Switch unless your console is modded.",
+						"Unfortunately, we don't support direct save file uploading from consoles (PlayStation, Xbox, Switch) unless yours is modded.",
 						"",
 						"If you want to track your progress, you'll need to manually enter your achievements and progress in the editor.",
 						"",
@@ -105,7 +127,7 @@ const InstructionsDialog = ({
 					))}
 				</DialogDescription>
 				<DialogFooter className="sm:justify-left flex flex-col gap-2 sm:flex-row">
-					{platform === "Switch" ? (
+					{platform === "Console" ? (
 						<Button onClick={() => setOpen(false)}>Close</Button>
 					) : (
 						<>
@@ -128,54 +150,91 @@ const InstructionsDialog = ({
 };
 
 export const UploadDialog = ({ open, setOpen }: Props) => {
-	const { activePlayer, uploadPlayers } = useContext(PlayersContext);
+	const router = useRouter();
+	const { uploadPlayers, connectAutoSync } = useContext(PlayersContext);
 	const [instructionsOpen, setInstructionsOpen] = useState(false);
 	const [selectedPlatform, setSelectedPlatform] = useState<
-		"Mac" | "Windows" | "Linux" | "Switch"
+		"Mac" | "Windows" | "Linux" | "Console"
 	>("Mac");
+	// Starts false on both server and client so the first client render still
+	// matches the SSR'd markup; flips right after mount once we can check.
+	// Browsers that support the File System Access API are also the only
+	// ones that can block clicking to browse (see the click handler below)
+	// and the only ones that can ever auto-sync in the first place, so this
+	// single flag doubles as "should clicking to browse be disabled?".
+	const [supportsAutoSync, setSupportsAutoSync] = useState(false);
 
-	const handleChange = (file: File) => {
-		setOpen(false);
+	useEffect(() => {
+		setSupportsAutoSync(
+			typeof (window as FilePickerWindow).showOpenFilePicker === "function",
+		);
+	}, []);
 
-		if (typeof file === "undefined" || !file) return;
+	// supportsAutoSync is detected on mount, well before the user can click
+	// the upload button, so by the time `open` flips true it already
+	// reflects reality — no race between the two effects in practice.
+	useEffect(() => {
+		if (!open || supportsAutoSync) return;
 
-		if (file.type !== "") {
-			toast.error("Invalid file type", {
-				description: "Please upload a Stardew Valley save file.",
-			});
-			return;
-		}
+		const reason = detectAutoSyncIncompatibility();
+		play("error");
+		toast.warning("Heads up!", {
+			description:
+				reason.kind === "browser"
+					? `Auto-sync doesn't work on ${reason.name}. Use Chrome instead to enable auto-sync.`
+					: "Auto-sync doesn't work on mobile. Use desktop instead to enable auto-sync.",
+		});
+	}, [open, supportsAutoSync]);
 
-		const reader = new FileReader();
+	const uploadFile = useCallback(
+		async (file: File, redirectToFarm: boolean) => {
+			if (typeof file === "undefined" || !file) return;
 
-		let uploadPromise;
+			if (file.type !== "") {
+				throw new Error("Please select a Stardew Valley save file.");
+			}
 
-		reader.onloadstart = () => {
-			uploadPromise = new Promise((resolve, reject) => {
-				reader.onload = async function (event) {
-					try {
-						const players = parseSaveFile(event.target?.result as string);
-						await uploadPlayers(players);
-						resolve("Your save file was successfully uploaded!");
-					} catch (err) {
-						reject(err instanceof Error ? err.message : "Unknown error.");
-					}
-				};
-			});
+			const saveText = await file.text();
+			const players = parseSaveFile(saveText);
+			const farmId = players[0]?.farmId;
+			await uploadPlayers(players);
 
-			// Start the loading toast
-			toast.promise(uploadPromise, {
+			if (redirectToFarm && farmId) {
+				await router.push(`/farm/${farmId}`);
+			}
+		},
+		[router, uploadPlayers],
+	);
+
+	// Handles a file from either the dropzone or the file picker. On browsers
+	// with the File System Access API, both paths can hand us a durable
+	// FileSystemFileHandle alongside the File — when they do, that's the
+	// trigger for automatic sync (owned by PlayersProvider, since this dialog
+	// itself is mounted more than once across the app). There's no separate
+	// "connect" step.
+	const handleIncomingFile = useCallback(
+		(file: File & { handle?: SaveFileHandle }) => {
+			if (typeof file === "undefined" || !file) return;
+
+			setOpen(false);
+			toast.promise(uploadFile(file, true), {
 				loading: "Uploading your save file...",
-				success: (data) => `${data}`,
+				success: file.handle
+					? {
+							message: "Uploaded!",
+							description:
+								"We'll keep this save synced while this tab is open.",
+						}
+					: "Your save file was successfully uploaded!",
 				error: (err) => `There was an error parsing your save file:\n${err}`,
 			});
 
-			// Reset the input
-			uploadPromise = null;
-		};
-
-		reader.readAsText(file);
-	};
+			if (file.handle) {
+				connectAutoSync(file.handle, file);
+			}
+		},
+		[connectAutoSync, setOpen, uploadFile],
+	);
 
 	return (
 		<>
@@ -184,31 +243,59 @@ export const UploadDialog = ({ open, setOpen }: Props) => {
 					<DialogHeader>
 						<DialogTitle>Upload your save file</DialogTitle>
 					</DialogHeader>
-					<DialogDescription>
-						<Dropzone
-							onDrop={(acceptedFiles) => {
-								handleChange(acceptedFiles[0]);
-							}}
-							useFsAccessApi={false}
-						>
-							{({ getRootProps, getInputProps }) => (
-								<>
-									<input className="h-full w-full" {...getInputProps()} />
-									<div className="h-[250px]">
-										<div
-											{...getRootProps()}
-											className="flex h-full w-full cursor-pointer select-none items-center justify-center rounded-lg border-2 border-dashed border-gray-800 dark:border-gray-400"
-										>
-											<div className="select-text text-center">
-												<p>
-													Drag and drop your save file here, or click to browse!
-												</p>
+					<DialogDescription asChild>
+						<div>
+							<Dropzone
+								noClick
+								useFsAccessApi={false}
+								onDrop={(acceptedFiles) => {
+									handleIncomingFile(
+										acceptedFiles[0] as File & { handle?: SaveFileHandle },
+									);
+								}}
+							>
+								{({ getRootProps, getInputProps, open }) => (
+									<>
+										<input className="h-full w-full" {...getInputProps()} />
+										<div className="h-[250px]">
+											<div
+												{...getRootProps({
+													onClick: (event) => {
+														event.preventDefault();
+														if (supportsAutoSync) {
+															play("error");
+															toast.error("Drag your save file in instead", {
+																description:
+																	"Clicking to browse doesn't always work. Drag the file into the box below to upload it and keep it synced.",
+															});
+														} else {
+															open();
+														}
+													},
+												})}
+												className="flex h-full w-full cursor-pointer select-none items-center justify-center rounded-lg border-2 border-dashed border-gray-800 dark:border-gray-400"
+											>
+												<div className="select-text px-6 text-center">
+													<p className="font-medium">
+														Drag and drop your save file here
+													</p>
+													{supportsAutoSync ? (
+														<p className="text-muted-foreground mt-2 text-xs">
+															Auto-sync keeps this save up to date while this
+															tab is open.
+														</p>
+													) : (
+														<p className="text-muted-foreground text-xs">
+															or click to browse
+														</p>
+													)}
+												</div>
 											</div>
 										</div>
-									</div>
-								</>
-							)}
-						</Dropzone>
+									</>
+								)}
+							</Dropzone>
+						</div>
 					</DialogDescription>
 					<div className="space-y-4">
 						<div className="text-left">
@@ -251,12 +338,12 @@ export const UploadDialog = ({ open, setOpen }: Props) => {
 							<Button
 								variant={"secondary"}
 								onClick={() => {
-									setSelectedPlatform("Switch");
+									setSelectedPlatform("Console");
 									setInstructionsOpen(true);
 								}}
 								className="w-full"
 							>
-								Nintendo Switch
+								Console
 							</Button>
 						</div>
 					</div>
