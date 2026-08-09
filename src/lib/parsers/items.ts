@@ -1,204 +1,424 @@
-import big_craftables from "@/data/big_craftables.json";
-import objects from "@/data/objects.json";
+import { GetListOrEmpty, deweaponize } from "@/lib/utils";
 
-import { deweaponize } from "../utils";
+/**
+ * Where an item was found in the save file. This lets a future net worth
+ * feature decide which sources count (e.g. exclude "placed" machines, or
+ * discount in-progress "machine" contents).
+ */
+export type ItemSourceType =
+	| "inventory" // player.items slots
+	| "equipment" // hat/boots/rings/shirt/pants (+ 1.6 trinket)
+	| "chest" // placed Chest contents (incl. Big Chest, Junimo Chest)
+	| "fridge" // kitchen fridge contents + Mini-Fridge contents
+	| "autoGrabber" // items collected by an Auto-Grabber
+	| "machine" // in-progress product held by a machine (Keg, Cask, ...)
+	| "buildingChest" // Mill/Junimo Hut input/output chests
+	| "fishPond" // accumulated FishPond output
+	| "dresser" // StorageFurniture (dresser) contents
+	| "fishTank" // FishTankFurniture contents
+	| "placed"; // the placed world object/furniture itself (keg, sprinkler, forage, table)
 
-/*
-	Scans a player's inventory and all storage containers (chests, fridges,
-	auto-grabbers, etc.) on the farm and returns an aggregated count of every
-	owned item.
+export type EquipmentSlot =
+	| "hat"
+	| "boots"
+	| "leftRing"
+	| "rightRing"
+	| "shirt"
+	| "pants"
+	| "trinket";
 
-	This is the shared foundation used to compute a player's net worth and to
-	power the "in storage" option of the ingredient tracker.
+export interface ItemRecord {
+	itemId: string; // unqualified item ID ("613"), or "" when the save has none (1.5 tools)
+	name: string;
+	type: string; // xsi:type of the item ("Object", "Cask", "Ring", "Furniture", ...)
+	stack: number;
+	quality: number; // 0 = normal, 1 = silver, 2 = gold, 4 = iridium
+	category?: number;
+	basePrice?: number; // the save's <price> — base price only, NOT the quality-adjusted sell value
+	bigCraftable?: boolean; // only set when true
+	source: ItemSourceType;
+	location: string; // "Farm", "FarmHouse", "Farm > Shed", "player", ...
+	container?: string; // enclosing container/machine name: "Chest", "Keg", "Auto-Grabber"
+	slot?: EquipmentSlot; // only for source === "equipment"
+	// timing fields from the parent machine, only on source === "machine".
+	// Casks use daysToMature/agingRate (their minutesUntilReady is a 999999
+	// sentinel while aging); other machines count down minutesUntilReady.
+	minutesUntilReady?: number;
+	readyForHarvest?: boolean; // only set when true
+	daysToMature?: number;
+	agingRate?: number;
+}
 
-	Each stack keeps the save's own name and price so that flavored artisan goods
-	(e.g. Starfruit Wine vs generic Wine) are valued and labelled correctly rather
-	than collapsed onto their base item. Item IDs follow the convention used
-	elsewhere in the app: plain numeric strings for regular objects (matching the
-	keys of objects.json) and a `(BC)` prefix for big craftables (matching
-	big_craftables.json keys, and how the ingredient cards reference them).
-*/
-
-export interface OwnedStack {
-	itemID: string; // base id: "(BC)<id>" for big craftables, plain numeric otherwise
-	name: string; // the item's in-save name (already flavored, e.g. "Starfruit Wine")
-	quality: string; // "0" | "1" | "2" | "4"
-	quantity: number;
-	price: number; // per-item base sell price from the save (flavored-aware), pre-quality
+export interface MoneyRet {
+	current: number; // this farmer's wallet (host wallet when wallets are shared)
+	totalEarned: number;
+	useSeparateWallets: boolean;
 }
 
 export interface ItemsRet {
-	// keyed by a stack signature so differently-flavored/valued items stay separate
-	items: { [key: string]: OwnedStack };
+	money: MoneyRet;
+	player: ItemRecord[]; // this farmer's inventory + equipment
+	world: ItemRecord[]; // shared world items — identical on every player, like walnuts
 }
 
-const OBJECTS = objects as Record<string, { price?: number; name?: string }>;
-const BIG_CRAFTABLES = big_craftables as Record<
-	string,
-	{ price?: number; name?: string }
->;
+/** Context applied to every record a walker emits. */
+interface ItemContext {
+	source: ItemSourceType;
+	location: string;
+	container?: string;
+	slot?: EquipmentSlot;
+	defaultType?: string; // xsi:type fallback for tag-named elements (<Furniture>, <hat>, ...)
+}
 
-/**
- * Resolve a single inventory/storage node to a normalized item id, or null if
- * it isn't a sellable object/big-craftable we track (tools, furniture, weapons,
- * hats, etc. are skipped).
- */
-function resolveItem(node: any): OwnedStack | null {
-	if (!node || typeof node !== "object") return null;
-
-	const quality = String(Number(node.quality ?? 0) || 0);
-	const quantity = Number(node.stack ?? 1) || 1;
-
-	let itemID: string | null = null;
-	let isBigCraftable = false;
-
-	// 1.6 stores a qualified item id like "(O)24" or "(BC)10".
-	if (node.itemId !== undefined && node.itemId !== null) {
-		const { key, value } = deweaponize(node.itemId.toString());
-		if (key === "BC" && value in BIG_CRAFTABLES) {
-			itemID = `(BC)${value}`;
-			isBigCraftable = true;
-		} else if ((key === "O" || key === "") && value in OBJECTS) {
-			itemID = value;
-		}
-	}
-
-	// 1.5 (and as a fallback) uses parentSheetIndex + a bigCraftable flag.
-	if (itemID === null && node.parentSheetIndex !== undefined) {
-		const psi = node.parentSheetIndex.toString();
-		const isBC =
-			node.bigCraftable === true ||
-			node.bigCraftable === "true" ||
-			node.isBigCraftable === true ||
-			node.isBigCraftable === "true";
-
-		if (isBC && psi in BIG_CRAFTABLES) {
-			itemID = `(BC)${psi}`;
-			isBigCraftable = true;
-		} else if (psi in OBJECTS) {
-			itemID = psi;
-		}
-	}
-
-	if (itemID === null) return null;
-
-	// Prefer the save's own per-item price: it already accounts for flavored
-	// goods (e.g. Starfruit Wine = 2250, not generic Wine). Fall back to the
-	// static data price only when the save omits it.
-	const dataEntry = isBigCraftable
-		? BIG_CRAFTABLES[itemID.slice(4)]
-		: OBJECTS[itemID];
-	const savedPrice = Number(node.price);
-	const price =
-		Number.isFinite(savedPrice) && savedPrice > 0
-			? savedPrice
-			: (dataEntry?.price ?? 0);
-
-	// The save's name is already flavored; fall back to the static data name.
-	const name =
-		(typeof node.name === "string" && node.name) || dataEntry?.name || itemID;
-
-	return { itemID, name, quality, quantity, price };
+// fast-xml-parser sometimes yields booleans as the string "true"/"false"
+function isTrue(value: any): boolean {
+	return value === true || value === "true";
 }
 
 /**
- * Recursively walk a subtree of the save, collecting items held inside
- * containers (chest `items.Item`, machine `heldObject`, etc.). Placed objects
- * themselves (machines, fences, the chest object) are intentionally not counted
- * — only their contents.
+ * The single choke point that turns a raw save-file element into an ItemRecord.
+ * Returns null for empty slots (`<Item xsi:nil="true" />` parses to an object
+ * with no `name`) and for the `[undefined]` entries GetListOrEmpty can yield.
  */
-function collectContainedItems(obj: any, acc: OwnedStack[]): void {
-	if (!obj || typeof obj !== "object") return;
+function readItem(
+	raw: any,
+	prefix: string,
+	ctx: ItemContext,
+): ItemRecord | null {
+	if (!raw || typeof raw !== "object") return null;
+	if (raw.name === undefined || raw.name === null) return null;
 
-	if (Array.isArray(obj)) {
-		for (const entry of obj) collectContainedItems(entry, acc);
-		return;
+	// 1.6 items carry a string <itemId> (sometimes qualified like "(O)613");
+	// 1.5 items only have <parentSheetIndex>. 1.5 tools have neither.
+	let itemId = "";
+	if (raw.itemId !== undefined && raw.itemId !== null) {
+		itemId = deweaponize(raw.itemId.toString()).value;
+	} else if (raw.parentSheetIndex !== undefined) {
+		itemId = raw.parentSheetIndex.toString();
 	}
 
-	// Chests / fridges / auto-grabbers store their contents under `items.Item`.
-	if (obj.items && obj.items.Item) {
-		const contents = Array.isArray(obj.items.Item)
-			? obj.items.Item
-			: [obj.items.Item];
-		for (const item of contents) {
-			const resolved = resolveItem(item);
-			if (resolved) acc.push(resolved);
-			// chests can contain chests (Junimo chests, etc.)
-			collectContainedItems(item, acc);
+	const record: ItemRecord = {
+		itemId,
+		name: raw.name.toString(),
+		type: raw[`@_${prefix}:type`]?.toString() ?? ctx.defaultType ?? "Object",
+		stack: Number(raw.stack) || 1,
+		quality: Number(raw.quality) || 0,
+		source: ctx.source,
+		location: ctx.location,
+	};
+
+	if (typeof raw.category === "number") record.category = raw.category;
+	if (typeof raw.price === "number") record.basePrice = raw.price;
+	if (isTrue(raw.bigCraftable)) record.bigCraftable = true;
+	if (ctx.container) record.container = ctx.container;
+	if (ctx.slot) record.slot = ctx.slot;
+
+	return record;
+}
+
+/** Reads a serialized item list like `<items><Item .../><Item .../></items>`. */
+function walkItemList(
+	wrapper: any, // the element containing <Item> children (e.g. a chest's `items`)
+	prefix: string,
+	ctx: ItemContext,
+): ItemRecord[] {
+	const records: ItemRecord[] = [];
+	for (const raw of GetListOrEmpty(wrapper, "Item")) {
+		const record = readItem(raw, prefix, ctx);
+		if (record) records.push(record);
+	}
+	return records;
+}
+
+/** A placed world object: the object itself, chest contents, machine output. */
+function walkObject(obj: any, prefix: string, location: string): ItemRecord[] {
+	if (!obj || typeof obj !== "object") return [];
+
+	const records: ItemRecord[] = [];
+	const type = obj[`@_${prefix}:type`]?.toString() ?? "Object";
+
+	const placed = readItem(obj, prefix, { source: "placed", location });
+	if (placed) records.push(placed);
+
+	if (type === "Chest") {
+		// Mini-Fridges are Chests flagged with <fridge>true</fridge>
+		records.push(
+			...walkItemList(obj.items, prefix, {
+				source: isTrue(obj.fridge) ? "fridge" : "chest",
+				location,
+				container: obj.name?.toString(),
+			}),
+		);
+	} else if (obj.heldObject && typeof obj.heldObject === "object") {
+		const heldType = obj.heldObject[`@_${prefix}:type`]?.toString();
+		if (heldType === "Chest") {
+			// Auto-Grabbers hold a Chest of collected items
+			records.push(
+				...walkItemList(obj.heldObject.items, prefix, {
+					source: "autoGrabber",
+					location,
+					container: obj.name?.toString(),
+				}),
+			);
+		} else {
+			// machines (Keg, Cask, Preserves Jar, ...) hold their in-progress product
+			const held = readItem(obj.heldObject, prefix, {
+				source: "machine",
+				location,
+				container: obj.name?.toString(),
+			});
+			if (held) {
+				if (typeof obj.minutesUntilReady === "number")
+					held.minutesUntilReady = obj.minutesUntilReady;
+				if (isTrue(obj.readyForHarvest)) held.readyForHarvest = true;
+				if (typeof obj.daysToMature === "number")
+					held.daysToMature = obj.daysToMature;
+				if (typeof obj.agingRate === "number")
+					held.agingRate = obj.agingRate;
+				records.push(held);
+			}
 		}
 	}
 
-	// Machines (kegs, furnaces, ...) keep their output in `heldObject`.
-	if (obj.heldObject) {
-		const resolved = resolveItem(obj.heldObject);
-		if (resolved) acc.push(resolved);
-		collectContainedItems(obj.heldObject, acc);
-	}
+	return records;
+}
 
-	for (const [key, value] of Object.entries(obj)) {
-		// already handled above; avoid re-descending into them here
-		if (key === "items" || key === "heldObject") continue;
-		if (value && typeof value === "object") {
-			collectContainedItems(value, acc);
+/** A placed furniture piece: the piece itself plus dresser/fish tank contents. */
+function walkFurniture(
+	furn: any,
+	prefix: string,
+	location: string,
+): ItemRecord[] {
+	if (!furn || typeof furn !== "object") return [];
+
+	const records: ItemRecord[] = [];
+	const type = furn[`@_${prefix}:type`]?.toString() ?? "Furniture";
+
+	const placed = readItem(furn, prefix, {
+		source: "placed",
+		location,
+		defaultType: "Furniture",
+	});
+	if (placed) records.push(placed);
+
+	const heldCtx: ItemContext = {
+		source: type === "FishTankFurniture" ? "fishTank" : "dresser",
+		location,
+		container: furn.name?.toString(),
+	};
+
+	// heldItems serializes two ways: StorageFurniture (dressers) wrap a list
+	// (`heldItems.Item[]`), FishTankFurniture repeats sibling <heldItems> elements
+	// that each ARE an item.
+	for (const entry of GetListOrEmpty(furn, "heldItems")) {
+		if (!entry || typeof entry !== "object") continue;
+		if (entry.Item !== undefined) {
+			records.push(...walkItemList(entry, prefix, heldCtx));
+		} else {
+			const record = readItem(entry, prefix, heldCtx);
+			if (record) records.push(record);
 		}
 	}
+
+	// items sitting on top of furniture (e.g. on a table)
+	if (furn.heldObject && typeof furn.heldObject === "object") {
+		const held = readItem(furn.heldObject, prefix, {
+			source: "placed",
+			location,
+			container: furn.name?.toString(),
+		});
+		if (held) records.push(held);
+	}
+
+	return records;
+}
+
+/** A farm building: its interior location, input/output chests, fish pond output. */
+function walkBuilding(
+	building: any,
+	prefix: string,
+	parentLocation: string,
+): ItemRecord[] {
+	if (!building || typeof building !== "object") return [];
+
+	const records: ItemRecord[] = [];
+	const type = building[`@_${prefix}:type`]?.toString();
+
+	// instanced interiors (sheds, barns, coops, cabins). FarmHouse/Greenhouse
+	// have no <indoors> (their interiors are top-level GameLocations), so this
+	// never double counts.
+	if (building.indoors && typeof building.indoors === "object") {
+		const label = `${parentLocation} > ${
+			building.buildingType?.toString() ?? "Building"
+		}`;
+		records.push(...walkLocation(building.indoors, prefix, label));
+	}
+
+	// 1.6: Mill/Junimo Hut chests live in <buildingChests>
+	for (const chest of GetListOrEmpty(building.buildingChests, "Chest")) {
+		if (!chest || typeof chest !== "object") continue;
+		records.push(
+			...walkItemList(chest.items, prefix, {
+				source: "buildingChest",
+				location: parentLocation,
+				container: chest.name?.toString(),
+			}),
+		);
+	}
+
+	// 1.5: the same chests were <input>/<output> on the building
+	for (const key of ["input", "output"]) {
+		const chest = building[key];
+		if (chest && typeof chest === "object" && chest.items !== undefined) {
+			records.push(
+				...walkItemList(chest.items, prefix, {
+					source: "buildingChest",
+					location: parentLocation,
+					container: key,
+				}),
+			);
+		}
+	}
+
+	if (type === "FishPond" && building.output) {
+		const output = readItem(building.output.Item, prefix, {
+			source: "fishPond",
+			location: parentLocation,
+			container: "Fish Pond",
+		});
+		if (output) records.push(output);
+	}
+
+	return records;
+}
+
+/** One GameLocation: placed objects, furniture, kitchen fridge, and buildings. */
+function walkLocation(loc: any, prefix: string, label: string): ItemRecord[] {
+	if (!loc || typeof loc !== "object") return [];
+
+	const records: ItemRecord[] = [];
+
+	// objects are a serialized dictionary: objects.item[].value.Object
+	for (const entry of GetListOrEmpty(loc.objects, "item")) {
+		records.push(...walkObject(entry?.value?.Object, prefix, label));
+	}
+
+	for (const furn of GetListOrEmpty(loc.furniture, "Furniture")) {
+		records.push(...walkFurniture(furn, prefix, label));
+	}
+
+	// FarmHouse/IslandFarmHouse/Cabins have a kitchen fridge (a full Chest)
+	if (loc.fridge && typeof loc.fridge === "object") {
+		records.push(
+			...walkItemList(loc.fridge.items, prefix, {
+				source: "fridge",
+				location: label,
+				container: "Fridge",
+			}),
+		);
+	}
+
+	for (const building of GetListOrEmpty(loc.buildings, "Building")) {
+		records.push(...walkBuilding(building, prefix, label));
+	}
+
+	return records;
+}
+
+/** This farmer's inventory and equipped items. */
+function walkPlayer(player: any, prefix: string): ItemRecord[] {
+	const records: ItemRecord[] = [];
+
+	records.push(
+		...walkItemList(player.items, prefix, {
+			source: "inventory",
+			location: "player",
+		}),
+	);
+
+	// equipment elements are typed by tag name and usually carry no xsi:type,
+	// so each slot supplies its own default. CombinedRing is emitted as a
+	// single record; expanding its nested combinedRings is a possible later
+	// enhancement.
+	const equipment: [string, EquipmentSlot, string][] = [
+		["hat", "hat", "Hat"],
+		["boots", "boots", "Boots"],
+		["leftRing", "leftRing", "Ring"],
+		["rightRing", "rightRing", "Ring"],
+		["shirtItem", "shirt", "Clothing"],
+		["pantsItem", "pants", "Clothing"],
+		["trinketItem", "trinket", "Trinket"], // 1.6 only
+	];
+	for (const [key, slot, defaultType] of equipment) {
+		const record = readItem(player[key], prefix, {
+			source: "equipment",
+			location: "player",
+			slot,
+			defaultType,
+		});
+		if (record) records.push(record);
+	}
+
+	return records;
+}
+
+function parseMoney(player: any, hostPlayer: any): MoneyRet {
+	// only the host's <player> element carries useSeparateWallets, and
+	// farmhands only carry their own <money> when wallets are separate
+	return {
+		current: Number(player.money ?? hostPlayer.money ?? 0),
+		totalEarned: Number(player.totalMoneyEarned ?? 0),
+		useSeparateWallets: isTrue(hostPlayer.useSeparateWallets),
+	};
 }
 
 /**
- * Collect every item held in storage containers across all game locations.
- *
- * Storage is shared between all players on a farm, so this is computed once and
- * merged into each player's items (mirroring how rarecrows/perfection are
- * precomputed and shared in `file.ts`).
+ * Walks every GameLocation in the save for items in the world: placed objects,
+ * chests, fridges, machines, building chests, fish ponds, and furniture.
+ * Called once per save; the result is shared across all players.
  */
-export function parseStorageItems(SaveGame: any): OwnedStack[] {
-	const collected: OwnedStack[] = [];
-
-	if (SaveGame?.locations?.GameLocation) {
-		const locations = Array.isArray(SaveGame.locations.GameLocation)
-			? SaveGame.locations.GameLocation
-			: [SaveGame.locations.GameLocation];
-		for (const location of locations) {
-			// handles nested locations such as cabins/sheds via recursion
-			collectContainedItems(location, collected);
-		}
-	}
-
-	return collected;
-}
-
-/**
- * Aggregate a single player's owned items: their personal inventory plus the
- * (precomputed, shared) farm storage.
- */
-export function parseItems(player: any, storageItems: OwnedStack[]): ItemsRet {
+export function parseWorldItems(prefix: string, SaveGame: any): ItemRecord[] {
 	try {
-		const collected: OwnedStack[] = [...storageItems];
+		const records: ItemRecord[] = [];
 
-		if (player?.items?.item) {
-			const inventory = Array.isArray(player.items.item)
-				? player.items.item
-				: [player.items.item];
-			for (const item of inventory) {
-				const resolved = resolveItem(item);
-				if (resolved) collected.push(resolved);
-			}
+		for (const loc of GetListOrEmpty(SaveGame.locations, "GameLocation")) {
+			if (!loc || typeof loc !== "object") continue;
+			const label =
+				loc.name?.toString() ??
+				loc[`@_${prefix}:type`]?.toString() ??
+				"Unknown";
+			records.push(...walkLocation(loc, prefix, label));
 		}
 
-		// Aggregate identical stacks. The key includes name + price so that
-		// differently-flavored goods (Starfruit Wine vs Blueberry Wine) stay
-		// separate while true duplicates across chests merge.
-		const items: { [key: string]: OwnedStack } = {};
-		for (const stack of collected) {
-			const key = `${stack.itemID}|${stack.quality}|${stack.name}|${stack.price}`;
-			if (items[key]) {
-				items[key].quantity += stack.quantity;
-			} else {
-				items[key] = { ...stack };
-			}
-		}
+		return records;
+	} catch (err) {
+		if (err instanceof Error)
+			throw new Error(`Error in parseWorldItems: ${err.message}`);
+		throw new Error(`Error in parseWorldItems: ${err}`);
+	}
+}
 
-		return { items };
+/**
+ * Assembles the items category for one farmer: their money, their inventory
+ * and equipment, plus the shared world items from parseWorldItems.
+ *
+ * NOTE: this is extraction only — no valuation. basePrice is the save's raw
+ * <price> (absent for weapons, 0 for tools/chests); computing real sell values
+ * (quality multipliers, professions, game data for missing prices) lives in
+ * net-worth.ts / weekly-income.ts on top of these records.
+ */
+export function parseItems(
+	player: any,
+	worldItems: ItemRecord[],
+	hostPlayer: any,
+	prefix: string,
+): ItemsRet {
+	try {
+		return {
+			money: parseMoney(player, hostPlayer),
+			player: walkPlayer(player, prefix),
+			world: worldItems,
+		};
 	} catch (err) {
 		if (err instanceof Error)
 			throw new Error(`Error in parseItems: ${err.message}`);

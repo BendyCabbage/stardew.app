@@ -9,7 +9,7 @@ import {
 	parseGeneral,
 	parseItems,
 	parseMonsters,
-	parseStorageItems,
+	parseWorldItems,
 	parseMuseum,
 	parsePerfection,
 	parsePowers,
@@ -110,7 +110,9 @@ export function parseSaveFile(xml: string) {
 
 		const parsedRarecrows = parseRarecrows(prefix, saveFile.SaveGame, players);
 
-		const storageItems = parseStorageItems(saveFile.SaveGame);
+		// all items found in the world (chests, machines, fridges, etc.),
+		// shared across every player like walnuts
+		const parsedWorldItems = parseWorldItems(prefix, saveFile.SaveGame);
 
 		const findInGameLocation = (location: string) => {
 			return saveFile.SaveGame.locations.GameLocation.find(
@@ -149,7 +151,12 @@ export function parseSaveFile(xml: string) {
 				cooking: parseCooking(player, version),
 				crafting: parseCrafting(player),
 				shipping: parseShipping(player, version),
-				items: parseItems(player, storageItems),
+				items: parseItems(
+					player,
+					parsedWorldItems,
+					saveFile.SaveGame.player,
+					prefix,
+				),
 				museum: parsedMuseum,
 				social: parseSocial(
 					player,
