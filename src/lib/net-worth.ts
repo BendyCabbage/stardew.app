@@ -4,7 +4,7 @@ import type {
 	ItemsRet,
 } from "@/lib/parsers/items";
 
-// sell price = floor(basePrice * multiplier), per StardewValley.Object.sellToStorePrice
+// per Object.sellToStorePrice
 const QUALITY_MULTIPLIERS: Record<number, number> = {
 	0: 1, // normal
 	1: 1.25, // silver
@@ -21,22 +21,13 @@ export interface NetWorthBreakdown {
 	unpricedCount: number; // records with no usable price (tools, weapons, hats...)
 }
 
-/**
- * Value of a single item record based on the save file's base price.
- * Items whose price isn't stored in the save (tools, weapons, most equipment)
- * count as 0 until valuation falls back to the game data price tables.
- */
 export function itemValue(item: ItemRecord): number {
 	if (typeof item.basePrice !== "number" || item.basePrice <= 0) return 0;
 	const multiplier = QUALITY_MULTIPLIERS[item.quality] ?? 1;
 	return Math.floor(item.basePrice * multiplier) * item.stack;
 }
 
-/**
- * Net worth of the save: current gold plus the sell value of every item
- * found anywhere — inventory, chests, fridges, in-progress machine contents,
- * placed objects, the lot.
- */
+/** Wallet plus the sell value of every item found anywhere. */
 export function calculateNetWorth(items: ItemsRet): NetWorthBreakdown {
 	const bySource: Partial<Record<ItemSourceType, number>> = {};
 	let itemsValue = 0;

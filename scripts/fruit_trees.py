@@ -1,11 +1,8 @@
-# Purpose: to parse FruitTrees.json from the content folder and keep which fruit
-# each tree grows, so 1.6 saves (which only store the tree ID) can be valued.
-# Result is saved to data/fruit_trees.json, keyed by tree ID (sapling item ID).
-# { treeID: { name, fruitId } }
+# Purpose: parse FruitTrees.json for which fruit each tree grows, keyed by tree ID
+# Result is saved to data/fruit_trees.json
 #
 # Content Files used: FruitTrees.json
-# Data Files used: objects.json (run objects.py first for fruit names)
-# Wiki Pages used: None
+# Data Files used: objects.json
 
 from tqdm import tqdm
 

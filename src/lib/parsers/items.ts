@@ -1,22 +1,61 @@
+import crops from "@/data/crops.json";
+import farmAnimals from "@/data/farm_animals.json";
+import fruitTrees from "@/data/fruit_trees.json";
+import objects from "@/data/objects.json";
 import { GetListOrEmpty, deweaponize } from "@/lib/utils";
 
-/**
- * Where an item was found in the save file. This lets a future net worth
- * feature decide which sources count (e.g. exclude "placed" machines, or
- * discount in-progress "machine" contents).
- */
+const objectData = objects as Record<
+	string,
+	{ name: string; price?: number; category?: string }
+>;
+
+export interface CropData {
+	name: string;
+	seedId: string;
+	growthDays: number;
+	regrowDays: number; // -1 if destroyed on harvest
+	minHarvest: number;
+	maxHarvest: number;
+	extraHarvestChance: number;
+}
+
+// keyed by harvest item ID
+export const cropData = crops as Record<string, CropData>;
+
+export interface FarmAnimalData {
+	produceId: string | null;
+	daysToProduce: number;
+	daysToMature: number;
+	sellPrice: number;
+	house: string;
+}
+
+// keyed by animal type ("White Chicken")
+export const farmAnimalData = farmAnimals as Record<string, FarmAnimalData>;
+
+// keyed by tree ID (1.6 FruitTree.treeId)
+const fruitTreeData = fruitTrees as Record<
+	string,
+	{ name: string; fruitId: string }
+>;
+
+/** Where an item was found in the save. */
 export type ItemSourceType =
-	| "inventory" // player.items slots
-	| "equipment" // hat/boots/rings/shirt/pants (+ 1.6 trinket)
-	| "chest" // placed Chest contents (incl. Big Chest, Junimo Chest)
-	| "fridge" // kitchen fridge contents + Mini-Fridge contents
-	| "autoGrabber" // items collected by an Auto-Grabber
-	| "machine" // in-progress product held by a machine (Keg, Cask, ...)
-	| "buildingChest" // Mill/Junimo Hut input/output chests
-	| "fishPond" // accumulated FishPond output
-	| "dresser" // StorageFurniture (dresser) contents
-	| "fishTank" // FishTankFurniture contents
-	| "placed"; // the placed world object/furniture itself (keg, sprinkler, forage, table)
+	| "inventory"
+	| "equipment"
+	| "chest"
+	| "fridge"
+	| "autoGrabber"
+	| "machine" // product held by a machine
+	| "buildingChest" // Mill / Junimo Hut
+	| "fishPond"
+	| "dresser"
+	| "fishTank"
+	| "crop" // growing in HoeDirt or a Garden Pot
+	| "fruitTree"
+	| "animal"
+	| "shippingBin"
+	| "placed"; // the placed object/furniture itself
 
 export type EquipmentSlot =
 	| "hat"
@@ -28,37 +67,38 @@ export type EquipmentSlot =
 	| "trinket";
 
 export interface ItemRecord {
-	itemId: string; // unqualified item ID ("613"), or "" when the save has none (1.5 tools)
+	itemId: string; // unqualified ("613"); "" for 1.5 tools
 	name: string;
-	type: string; // xsi:type of the item ("Object", "Cask", "Ring", "Furniture", ...)
+	type: string; // xsi:type ("Object", "Cask", "Furniture", ...)
 	stack: number;
-	quality: number; // 0 = normal, 1 = silver, 2 = gold, 4 = iridium
+	quality: number; // 0 normal, 1 silver, 2 gold, 4 iridium
 	category?: number;
-	basePrice?: number; // the save's <price> — base price only, NOT the quality-adjusted sell value
-	bigCraftable?: boolean; // only set when true
+	basePrice?: number; // the save's <price>, not quality-adjusted
+	bigCraftable?: boolean;
 	source: ItemSourceType;
-	location: string; // "Farm", "FarmHouse", "Farm > Shed", "player", ...
-	container?: string; // enclosing container/machine name: "Chest", "Keg", "Auto-Grabber"
-	slot?: EquipmentSlot; // only for source === "equipment"
-	// timing fields from the parent machine, only on source === "machine".
-	// Casks use daysToMature/agingRate (their minutesUntilReady is a 999999
-	// sentinel while aging); other machines count down minutesUntilReady.
+	location: string; // "Farm", "Farm > Shed", "player", ...
+	container?: string; // "Chest", "Keg", pet name for animals, ...
+	slot?: EquipmentSlot;
+	// machine: casks use daysToMature/agingRate, everything else minutesUntilReady
 	minutesUntilReady?: number;
-	readyForHarvest?: boolean; // only set when true
+	readyForHarvest?: boolean;
 	daysToMature?: number;
 	agingRate?: number;
+	machineId?: string; // machine: which machine holds the product ("12" = Keg)
+	growthDays?: number; // crop: planting to harvest, with fertilizer applied
+	mature?: boolean; // fruitTree / animal: old enough to produce
 }
 
 export interface MoneyRet {
-	current: number; // this farmer's wallet (host wallet when wallets are shared)
+	current: number; // host wallet when wallets are shared
 	totalEarned: number;
 	useSeparateWallets: boolean;
 }
 
 export interface ItemsRet {
 	money: MoneyRet;
-	player: ItemRecord[]; // this farmer's inventory + equipment
-	world: ItemRecord[]; // shared world items — identical on every player, like walnuts
+	player: ItemRecord[]; // inventory + equipment
+	world: ItemRecord[]; // shared across players
 }
 
 /** Context applied to every record a walker emits. */
@@ -67,19 +107,15 @@ interface ItemContext {
 	location: string;
 	container?: string;
 	slot?: EquipmentSlot;
-	defaultType?: string; // xsi:type fallback for tag-named elements (<Furniture>, <hat>, ...)
+	defaultType?: string; // xsi:type fallback for tag-named elements (<hat>, ...)
 }
 
-// fast-xml-parser sometimes yields booleans as the string "true"/"false"
+// booleans sometimes parse as the strings "true"/"false"
 function isTrue(value: any): boolean {
 	return value === true || value === "true";
 }
 
-/**
- * The single choke point that turns a raw save-file element into an ItemRecord.
- * Returns null for empty slots (`<Item xsi:nil="true" />` parses to an object
- * with no `name`) and for the `[undefined]` entries GetListOrEmpty can yield.
- */
+/** Raw save element -> ItemRecord; null for empty slots. */
 function readItem(
 	raw: any,
 	prefix: string,
@@ -88,8 +124,7 @@ function readItem(
 	if (!raw || typeof raw !== "object") return null;
 	if (raw.name === undefined || raw.name === null) return null;
 
-	// 1.6 items carry a string <itemId> (sometimes qualified like "(O)613");
-	// 1.5 items only have <parentSheetIndex>. 1.5 tools have neither.
+	// 1.6: <itemId> (maybe qualified "(O)613"); 1.5: <parentSheetIndex>
 	let itemId = "";
 	if (raw.itemId !== undefined && raw.itemId !== null) {
 		itemId = deweaponize(raw.itemId.toString()).value;
@@ -116,7 +151,6 @@ function readItem(
 	return record;
 }
 
-/** Reads a serialized item list like `<items><Item .../><Item .../></items>`. */
 function walkItemList(
 	wrapper: any, // the element containing <Item> children (e.g. a chest's `items`)
 	prefix: string,
@@ -130,7 +164,6 @@ function walkItemList(
 	return records;
 }
 
-/** A placed world object: the object itself, chest contents, machine output. */
 function walkObject(obj: any, prefix: string, location: string): ItemRecord[] {
 	if (!obj || typeof obj !== "object") return [];
 
@@ -140,8 +173,10 @@ function walkObject(obj: any, prefix: string, location: string): ItemRecord[] {
 	const placed = readItem(obj, prefix, { source: "placed", location });
 	if (placed) records.push(placed);
 
-	if (type === "Chest") {
-		// Mini-Fridges are Chests flagged with <fridge>true</fridge>
+	if (type === "IndoorPot") {
+		const crop = readCrop(obj.hoeDirt?.crop, location, obj.name?.toString());
+		if (crop) records.push(crop);
+	} else if (type === "Chest") {
 		records.push(
 			...walkItemList(obj.items, prefix, {
 				source: isTrue(obj.fridge) ? "fridge" : "chest",
@@ -152,7 +187,6 @@ function walkObject(obj: any, prefix: string, location: string): ItemRecord[] {
 	} else if (obj.heldObject && typeof obj.heldObject === "object") {
 		const heldType = obj.heldObject[`@_${prefix}:type`]?.toString();
 		if (heldType === "Chest") {
-			// Auto-Grabbers hold a Chest of collected items
 			records.push(
 				...walkItemList(obj.heldObject.items, prefix, {
 					source: "autoGrabber",
@@ -161,13 +195,13 @@ function walkObject(obj: any, prefix: string, location: string): ItemRecord[] {
 				}),
 			);
 		} else {
-			// machines (Keg, Cask, Preserves Jar, ...) hold their in-progress product
 			const held = readItem(obj.heldObject, prefix, {
 				source: "machine",
 				location,
 				container: obj.name?.toString(),
 			});
 			if (held) {
+				if (placed?.itemId) held.machineId = placed.itemId;
 				if (typeof obj.minutesUntilReady === "number")
 					held.minutesUntilReady = obj.minutesUntilReady;
 				if (isTrue(obj.readyForHarvest)) held.readyForHarvest = true;
@@ -183,7 +217,6 @@ function walkObject(obj: any, prefix: string, location: string): ItemRecord[] {
 	return records;
 }
 
-/** A placed furniture piece: the piece itself plus dresser/fish tank contents. */
 function walkFurniture(
 	furn: any,
 	prefix: string,
@@ -207,9 +240,7 @@ function walkFurniture(
 		container: furn.name?.toString(),
 	};
 
-	// heldItems serializes two ways: StorageFurniture (dressers) wrap a list
-	// (`heldItems.Item[]`), FishTankFurniture repeats sibling <heldItems> elements
-	// that each ARE an item.
+	// dressers wrap a list (heldItems.Item[]); fish tanks repeat <heldItems> per item
 	for (const entry of GetListOrEmpty(furn, "heldItems")) {
 		if (!entry || typeof entry !== "object") continue;
 		if (entry.Item !== undefined) {
@@ -220,7 +251,7 @@ function walkFurniture(
 		}
 	}
 
-	// items sitting on top of furniture (e.g. on a table)
+	// item sitting on top (tables)
 	if (furn.heldObject && typeof furn.heldObject === "object") {
 		const held = readItem(furn.heldObject, prefix, {
 			source: "placed",
@@ -233,7 +264,6 @@ function walkFurniture(
 	return records;
 }
 
-/** A farm building: its interior location, input/output chests, fish pond output. */
 function walkBuilding(
 	building: any,
 	prefix: string,
@@ -244,9 +274,7 @@ function walkBuilding(
 	const records: ItemRecord[] = [];
 	const type = building[`@_${prefix}:type`]?.toString();
 
-	// instanced interiors (sheds, barns, coops, cabins). FarmHouse/Greenhouse
-	// have no <indoors> (their interiors are top-level GameLocations), so this
-	// never double counts.
+	// sheds/barns/coops/cabins; FarmHouse and Greenhouse are top-level locations
 	if (building.indoors && typeof building.indoors === "object") {
 		const label = `${parentLocation} > ${
 			building.buildingType?.toString() ?? "Building"
@@ -254,7 +282,7 @@ function walkBuilding(
 		records.push(...walkLocation(building.indoors, prefix, label));
 	}
 
-	// 1.6: Mill/Junimo Hut chests live in <buildingChests>
+	// 1.6 Mill / Junimo Hut chests
 	for (const chest of GetListOrEmpty(building.buildingChests, "Chest")) {
 		if (!chest || typeof chest !== "object") continue;
 		records.push(
@@ -266,7 +294,7 @@ function walkBuilding(
 		);
 	}
 
-	// 1.5: the same chests were <input>/<output> on the building
+	// 1.5 equivalent
 	for (const key of ["input", "output"]) {
 		const chest = building[key];
 		if (chest && typeof chest === "object" && chest.items !== undefined) {
@@ -292,13 +320,176 @@ function walkBuilding(
 	return records;
 }
 
-/** One GameLocation: placed objects, furniture, kitchen fridge, and buildings. */
+// 1.6 forage crops have no harvest item, only whichForageCrop
+const FORAGE_CROP_HARVEST: Record<string, string> = {
+	"1": "399", // Spring Onion
+	"2": "829", // Ginger
+};
+
+/** A live crop, as minHarvest of its harvest item at normal quality. */
+function readCrop(
+	crop: any,
+	location: string,
+	container?: string,
+): ItemRecord | null {
+	if (!crop || typeof crop !== "object") return null;
+	if (isTrue(crop.dead)) return null;
+
+	let harvestId = "";
+	if (crop.indexOfHarvest !== undefined && crop.indexOfHarvest !== null) {
+		harvestId = deweaponize(crop.indexOfHarvest.toString()).value;
+	}
+	if ((!harvestId || harvestId === "-1") && isTrue(crop.forageCrop)) {
+		harvestId = FORAGE_CROP_HARVEST[crop.whichForageCrop?.toString()] ?? "";
+	}
+	if (!harvestId || harvestId === "-1") return null;
+
+	const data = objectData[harvestId];
+	const growth = cropData[harvestId];
+
+	// the last phase is a 99999 sentinel
+	const phaseDays = GetListOrEmpty(crop.phaseDays, "int")
+		.map(Number)
+		.filter((d) => Number.isFinite(d) && d < 99999);
+	const currentPhase = Number(crop.currentPhase) || 0;
+	const dayOfCurrentPhase = Number(crop.dayOfCurrentPhase) || 0;
+	const fullyGrown = isTrue(crop.fullyGrown);
+
+	// per Crop.cs; regrowing crops count dayOfCurrentPhase down to the next harvest
+	const inFinalPhase = currentPhase >= phaseDays.length;
+	const ready = inFinalPhase && (!fullyGrown || dayOfCurrentPhase <= 0);
+
+	const growthDays = phaseDays.reduce((sum, d) => sum + d, 0);
+
+	const record: ItemRecord = {
+		itemId: harvestId,
+		name: data?.name ?? `Crop ${harvestId}`,
+		type: "Crop",
+		stack: Math.max(1, growth?.minHarvest ?? 1),
+		quality: 0,
+		source: "crop",
+		location,
+		growthDays,
+	};
+	if (typeof data?.price === "number") record.basePrice = data.price;
+	if (ready) record.readyForHarvest = true;
+	if (container) record.container = container;
+	return record;
+}
+
+/** A fruit tree: stack = fruit on it, mature = producing. Quality follows tree age. */
+function readFruitTree(
+	tree: any,
+	prefix: string,
+	location: string,
+): ItemRecord | null {
+	const age = Number(tree.daysUntilMature) || 0;
+	let quality = 0;
+	if (age <= -336) quality = 4;
+	else if (age <= -224) quality = 2;
+	else if (age <= -112) quality = 1;
+
+	// 1.6: fruit items + treeId; 1.5: indexOfFruit + fruitsOnTree
+	const fruitItems = GetListOrEmpty(tree.fruit, "Item").filter(
+		(item) => item && typeof item === "object" && item.name !== undefined,
+	);
+	let fruitId = "";
+	let count = 0;
+	if (tree.fruit !== undefined && tree.fruit !== null) {
+		count = fruitItems.reduce(
+			(sum, item) => sum + (Number(item.stack) || 1),
+			0,
+		);
+		if (fruitItems[0]?.itemId !== undefined) {
+			fruitId = deweaponize(fruitItems[0].itemId.toString()).value;
+		} else if (tree.treeId !== undefined && tree.treeId !== null) {
+			fruitId = fruitTreeData[tree.treeId.toString()]?.fruitId ?? "";
+		}
+	} else if (tree.indexOfFruit !== undefined) {
+		fruitId = tree.indexOfFruit.toString();
+		count = Number(tree.fruitsOnTree) || 0;
+	}
+	if (!fruitId) return null;
+
+	const data = objectData[fruitId];
+	const record: ItemRecord = {
+		itemId: fruitId,
+		name: data?.name ?? `Fruit ${fruitId}`,
+		type: "Object",
+		stack: count,
+		quality,
+		source: "fruitTree",
+		location,
+		container: "Fruit Tree",
+	};
+	if (typeof data?.price === "number") record.basePrice = data.price;
+	if (age <= 0) record.mature = true;
+	return record;
+}
+
+function walkTerrainFeatures(
+	loc: any,
+	prefix: string,
+	location: string,
+): ItemRecord[] {
+	const records: ItemRecord[] = [];
+
+	for (const entry of GetListOrEmpty(loc.terrainFeatures, "item")) {
+		const feature = entry?.value?.TerrainFeature;
+		if (!feature || typeof feature !== "object") continue;
+		const type = feature[`@_${prefix}:type`]?.toString();
+
+		if (type === "HoeDirt") {
+			const crop = readCrop(feature.crop, location);
+			if (crop) records.push(crop);
+		} else if (type === "FruitTree") {
+			const tree = readFruitTree(feature, prefix, location);
+			if (tree) records.push(tree);
+		}
+	}
+
+	return records;
+}
+
+/** Animals, valued per FarmAnimal.getSellPrice. */
+function walkAnimals(loc: any, location: string): ItemRecord[] {
+	const records: ItemRecord[] = [];
+
+	for (const entry of GetListOrEmpty(loc.animals, "item")) {
+		const animal = entry?.value?.FarmAnimal;
+		if (!animal || typeof animal !== "object") continue;
+
+		const species = animal.type?.toString() ?? "Animal";
+		const price = Number(animal.price) || 0;
+		const friendship = Number(animal.friendshipTowardFarmer) || 0;
+		const sellPrice = Math.floor(price * (friendship / 1000 + 0.3));
+		const age = Number(animal.age) || 0;
+		const daysToMature = farmAnimalData[species]?.daysToMature ?? 0;
+
+		const record: ItemRecord = {
+			itemId: "",
+			name: species,
+			type: "FarmAnimal",
+			stack: 1,
+			quality: 0,
+			source: "animal",
+			location,
+		};
+		if (sellPrice > 0) record.basePrice = sellPrice;
+		if (age >= daysToMature) record.mature = true;
+		if (animal.name !== undefined && animal.name !== null)
+			record.container = animal.name.toString();
+		records.push(record);
+	}
+
+	return records;
+}
+
 function walkLocation(loc: any, prefix: string, label: string): ItemRecord[] {
 	if (!loc || typeof loc !== "object") return [];
 
 	const records: ItemRecord[] = [];
 
-	// objects are a serialized dictionary: objects.item[].value.Object
 	for (const entry of GetListOrEmpty(loc.objects, "item")) {
 		records.push(...walkObject(entry?.value?.Object, prefix, label));
 	}
@@ -307,13 +498,26 @@ function walkLocation(loc: any, prefix: string, label: string): ItemRecord[] {
 		records.push(...walkFurniture(furn, prefix, label));
 	}
 
-	// FarmHouse/IslandFarmHouse/Cabins have a kitchen fridge (a full Chest)
+	// kitchen fridge
 	if (loc.fridge && typeof loc.fridge === "object") {
 		records.push(
 			...walkItemList(loc.fridge.items, prefix, {
 				source: "fridge",
 				location: label,
 				container: "Fridge",
+			}),
+		);
+	}
+
+	records.push(...walkTerrainFeatures(loc, prefix, label));
+	records.push(...walkAnimals(loc, label));
+
+	if (loc.shippingBin && typeof loc.shippingBin === "object") {
+		records.push(
+			...walkItemList(loc.shippingBin, prefix, {
+				source: "shippingBin",
+				location: label,
+				container: "Shipping Bin",
 			}),
 		);
 	}
@@ -325,7 +529,6 @@ function walkLocation(loc: any, prefix: string, label: string): ItemRecord[] {
 	return records;
 }
 
-/** This farmer's inventory and equipped items. */
 function walkPlayer(player: any, prefix: string): ItemRecord[] {
 	const records: ItemRecord[] = [];
 
@@ -336,10 +539,7 @@ function walkPlayer(player: any, prefix: string): ItemRecord[] {
 		}),
 	);
 
-	// equipment elements are typed by tag name and usually carry no xsi:type,
-	// so each slot supplies its own default. CombinedRing is emitted as a
-	// single record; expanding its nested combinedRings is a possible later
-	// enhancement.
+	// equipment elements carry no xsi:type, so each slot supplies a default
 	const equipment: [string, EquipmentSlot, string][] = [
 		["hat", "hat", "Hat"],
 		["boots", "boots", "Boots"],
@@ -363,8 +563,7 @@ function walkPlayer(player: any, prefix: string): ItemRecord[] {
 }
 
 function parseMoney(player: any, hostPlayer: any): MoneyRet {
-	// only the host's <player> element carries useSeparateWallets, and
-	// farmhands only carry their own <money> when wallets are separate
+	// only the host has useSeparateWallets; farmhands only have <money> when separate
 	return {
 		current: Number(player.money ?? hostPlayer.money ?? 0),
 		totalEarned: Number(player.totalMoneyEarned ?? 0),
@@ -372,11 +571,7 @@ function parseMoney(player: any, hostPlayer: any): MoneyRet {
 	};
 }
 
-/**
- * Walks every GameLocation in the save for items in the world: placed objects,
- * chests, fridges, machines, building chests, fish ponds, and furniture.
- * Called once per save; the result is shared across all players.
- */
+/** Every item in the world. Run once per save and shared across players. */
 export function parseWorldItems(prefix: string, SaveGame: any): ItemRecord[] {
 	try {
 		const records: ItemRecord[] = [];
@@ -398,15 +593,7 @@ export function parseWorldItems(prefix: string, SaveGame: any): ItemRecord[] {
 	}
 }
 
-/**
- * Assembles the items category for one farmer: their money, their inventory
- * and equipment, plus the shared world items from parseWorldItems.
- *
- * NOTE: this is extraction only — no valuation. basePrice is the save's raw
- * <price> (absent for weapons, 0 for tools/chests); computing real sell values
- * (quality multipliers, professions, game data for missing prices) lives in
- * net-worth.ts / weekly-income.ts on top of these records.
- */
+/** One farmer's money, inventory and equipment plus the shared world items. */
 export function parseItems(
 	player: any,
 	worldItems: ItemRecord[],

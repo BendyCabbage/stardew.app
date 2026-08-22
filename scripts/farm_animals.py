@@ -1,11 +1,7 @@
-# Purpose: to parse FarmAnimals.json from the content folder and keep what each
-# animal produces and how often, for estimating long-run animal income.
-# Result is saved to data/farm_animals.json, keyed by animal type (the save's
-# FarmAnimal.type, e.g. "White Chicken").
-# { type: { produceId, daysToProduce, daysToMature, sellPrice, house } }
+# Purpose: parse FarmAnimals.json for produce and timing, keyed by animal type
+# Result is saved to data/farm_animals.json
 #
 # Content Files used: FarmAnimals.json
-# Wiki Pages used: None
 
 from tqdm import tqdm
 

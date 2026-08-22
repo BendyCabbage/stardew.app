@@ -1,15 +1,8 @@
-# Purpose: to parse Machines.json from the content folder and keep how long each
-# machine takes to produce its output, for estimating long-run machine income.
-# Result is saved to data/machines.json, keyed by the machine's big craftable ID.
-# { machineID: { name, minutes, byOutput: { outputItemID: minutes } } }
-#   minutes  - typical processing time (in-game minutes, 1600 per day), or null
-#              when the machine has no timed output rules (e.g. Tapper, Cask)
-#   byOutput - processing time for specific outputs where rules differ
-#              (Furnace bars, Crystalarium gems, Keg drinks, ...)
+# Purpose: parse Machines.json for processing times (in-game minutes), keyed by machine ID
+# Result is saved to data/machines.json as { name, minutes, byOutput: { itemID: minutes } }
 #
 # Content Files used: Machines.json
-# Data Files used: big_craftables.json (run bigcraftables.py first for names)
-# Wiki Pages used: None
+# Data Files used: big_craftables.json
 
 from collections import defaultdict
 from statistics import mean
@@ -24,8 +17,7 @@ BIG_CRAFTABLES: dict[str, dict] = load_data("big_craftables.json")
 
 MINUTES_PER_DAY = 1600
 
-# FLAVORED_ITEM outputs (wine, jelly, ...) are stored in the save under the
-# base item's ID, so map the flavor type to that ID
+# flavored outputs are saved under the base item's ID
 FLAVORED_ITEM_IDS = {
     "Honey": "340",
     "Wine": "348",
@@ -48,23 +40,21 @@ def rule_minutes(rule: dict) -> int | None:
     days = rule.get("DaysUntilReady", -1)
     if days > 0:
         return days * MINUTES_PER_DAY
-    # no duration and produced by code: the machine decides (Cask aging)
     if all(item.get("OutputMethod") for item in rule.get("OutputItem") or []):
-        return None
-    # rules with no duration fire on the daily update (statues, coffee maker)
-    return MINUTES_PER_DAY
+        return None  # code-driven (Cask)
+    return MINUTES_PER_DAY  # daily rules (statues, coffee maker)
 
 
 def output_id(output: dict) -> str | None:
     item_id = output.get("ItemId")
     if not item_id:
-        return None  # produced by code (OutputMethod) or a random pick
+        return None
     if item_id.startswith("(O)"):
         return item_id[3:]
     if item_id.startswith("FLAVORED_ITEM "):
         flavor = item_id.split(" ")[1]
         return FLAVORED_ITEM_IDS.get(flavor)
-    return None  # DROP_IN etc.
+    return None
 
 
 def get_machines() -> dict[str, Machine]:
@@ -88,8 +78,7 @@ def get_machines() -> dict[str, Machine]:
 
         default = round(mean(all_minutes)) if all_minutes else None
 
-        # ReadyTimeModifiers override the time for specific items
-        # (Crystalarium: "ITEM_ID Target (O)72" -> Set 5000)
+        # per-item overrides, e.g. Crystalarium "ITEM_ID Target (O)72"
         for modifier in value.get("ReadyTimeModifiers") or []:
             condition = modifier.get("Condition") or ""
             parts = condition.split(" ")
@@ -105,8 +94,7 @@ def get_machines() -> dict[str, Machine]:
         output[machine_id] = {
             "name": name,
             "minutes": default,
-            # when several rules make the same item in different times (Oil
-            # Maker: 60 to 3200 minutes depending on input), use the average
+            # average when inputs differ (Oil Maker)
             "byOutput": {
                 item_id: round(mean(minutes))
                 for item_id, minutes in by_output.items()

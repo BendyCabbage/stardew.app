@@ -34,22 +34,42 @@ function regionOf(record: ItemRecord): string {
 	return "The Valley";
 }
 
+// "IslandNorthCave1" -> "Island North Cave 1"
+function formatLocationName(name: string): string {
+	return name
+		.replace(/([a-z])([A-Z])/g, "$1 $2") // IslandWest -> Island West
+		.replace(/([A-Za-z])(\d)/g, "$1 $2") // Cave1 -> Cave 1
+		.replace(/(\d)([A-Za-z])/g, "$1 $2"); // 1Room -> 1 Room
+}
+
 function locationLabel(record: ItemRecord): string {
 	if (record.location === "player") {
 		return record.source === "equipment" ? "Equipped" : "Inventory";
 	}
-	// inside The Farm region the "Farm > " prefix is redundant
 	if (record.location.startsWith("Farm > ")) {
-		return record.location.slice("Farm > ".length);
+		return formatLocationName(record.location.slice("Farm > ".length));
 	}
-	return record.location;
+	return formatLocationName(record.location);
 }
 
-/**
- * Everything contributing to net worth or weekly income, aggregated per item
- * per spot and grouped into the game's broad regions. Records contributing
- * nothing (unpriced tools, idle machines) are left out.
- */
+// in-progress items get a suffix so they don't merge with stock in chests
+function rowName(record: ItemRecord): string {
+	switch (record.source) {
+		case "crop":
+			return `${record.name} (${record.readyForHarvest ? "ready to harvest" : "growing"
+				})`;
+		case "fruitTree":
+			return `${record.name} (on tree)`;
+		case "machine":
+			return record.container
+				? `${record.name} (in ${record.container.toLocaleLowerCase()})`
+				: `${record.name} (processing)`;
+		default:
+			return record.name;
+	}
+}
+
+/** Rows per item per spot, grouped by region. Zero-value, zero-income records are dropped. */
 export function buildBreakdown(items: ItemsRet): RegionBreakdown[] {
 	const regions = new Map<
 		string,
@@ -72,7 +92,8 @@ export function buildBreakdown(items: ItemsRet): RegionBreakdown[] {
 		region.weekly += weekly;
 
 		const location = locationLabel(record);
-		const key = `${record.name}|${location}`;
+		const name = rowName(record);
+		const key = `${name}|${location}`;
 		const row = region.rows.get(key);
 		if (row) {
 			row.count += record.stack;
@@ -80,7 +101,7 @@ export function buildBreakdown(items: ItemsRet): RegionBreakdown[] {
 			row.weekly += weekly;
 		} else {
 			region.rows.set(key, {
-				name: record.name,
+				name,
 				count: record.stack,
 				location,
 				value,
