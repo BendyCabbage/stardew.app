@@ -13,6 +13,35 @@ class Object(TypedDict):
     price: int
 
 
+class Crop(TypedDict):
+    name: str
+    seedId: str
+    growthDays: int
+    regrowDays: int
+    minHarvest: int
+    maxHarvest: int
+    extraHarvestChance: float
+
+
+class Machine(TypedDict):
+    name: str
+    minutes: Optional[int]
+    byOutput: dict[str, int]
+
+
+class FarmAnimal(TypedDict):
+    produceId: Optional[str]
+    daysToProduce: int
+    daysToMature: int
+    sellPrice: int
+    house: str
+
+
+class FruitTree(TypedDict):
+    name: str
+    fruitId: str
+
+
 class BigObject(TypedDict):
     name: str
     description: str
